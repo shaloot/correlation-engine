@@ -105,9 +105,104 @@ def compute_correlations(returns):
     return df.sort_values("Correlation", ascending=False).reset_index(drop=True)
 
 
+SIG_YES_LABEL = "✓ Likely real"
+SIG_NO_LABEL = "✗ Could be chance"
+
+SIG_GREEN = "#2ecc71"
+SIG_GREEN_LINE = "#12703a"
+NOT_SIG_GRAY = "#95a5a6"
+NOT_SIG_RED_LINE = "#e74c3c"
+
+
+def significance_label(raw_value):
+    """Map the raw 'Yes'/'No' significance flag to a plain-English display label."""
+    return SIG_YES_LABEL if raw_value == "Yes" else SIG_NO_LABEL
+
+
+def correlation_strength(corr):
+    magnitude = abs(corr)
+    if magnitude < 0.2:
+        return "very weak"
+    if magnitude < 0.4:
+        return "weak"
+    if magnitude < 0.6:
+        return "moderate"
+    return "strong"
+
+
+def join_phrases(phrases):
+    """Join phrases as 'a', 'a and b', or 'a, b and c'."""
+    if not phrases:
+        return ""
+    if len(phrases) == 1:
+        return phrases[0]
+    return ", ".join(phrases[:-1]) + " and " + phrases[-1]
+
+
+def describe_selection(analysed_tickers):
+    """One sentence describing what was selected, based on the tickers actually analysed."""
+    counts = {}
+    for ticker in analysed_tickers:
+        industry = industry_of(ticker)
+        counts[industry] = counts.get(industry, 0) + 1
+
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    phrases = [
+        f"**{n} {industry}** stock{'s' if n != 1 else ''}" for industry, n in ordered
+    ]
+
+    if len(ordered) == 1:
+        scope = "within that group"
+    elif len(ordered) == 2:
+        scope = "within each group and across both"
+    else:
+        scope = "within each group and across all of them"
+
+    return (
+        f"You selected {join_phrases(phrases)}. We're comparing every stock against "
+        f"every other one, {scope}, to see which pairs move together and which don't."
+    )
+
+
+def describe_span(trading_days):
+    """Express a trading-day count as an approximate human-readable span."""
+    years = trading_days / 250
+    if years < 1:
+        months = max(1, round(years * 12))
+        return f"roughly {months} month{'s' if months != 1 else ''}"
+    if round(years, 1) == 1.0:
+        return "roughly 1 year"
+    return f"roughly {years:.1f} years"
+
+
 def style_significance(row):
-    color = "background-color: #1a4d2e" if row["Significant?"] == "Yes" else "background-color: #4d1a1a"
+    is_significant = row["Significant?"] in ("Yes", SIG_YES_LABEL)
+    color = "background-color: #1a4d2e" if is_significant else "background-color: #4d1a1a"
     return [color] * len(row)
+
+
+PAIR_TABLE_COLUMNS = ["Stock 1", "Stock 2", "Correlation", "P-Value", "Significant?"]
+
+PAIR_COLUMN_CONFIG = {
+    "Correlation": st.column_config.ProgressColumn(
+        "Correlation",
+        help="How much two stocks move together, from -1 (opposite) to 1 (identical movement).",
+        format="%.3f",
+        min_value=0.0,
+        max_value=1.0,
+    ),
+    "P-Value": st.column_config.NumberColumn(
+        "P-Value",
+        help="Probability this result is due to random chance. Below 0.05 means the "
+        "relationship is likely real.",
+        format="%.4f",
+    ),
+    "Significant?": st.column_config.TextColumn(
+        "Significant?",
+        help="Whether the correlation passes the 0.05 threshold for being considered "
+        "real rather than coincidence (statistically significant, p < 0.05).",
+    ),
+}
 
 
 def industry_of(ticker):
@@ -117,7 +212,7 @@ def industry_of(ticker):
     return "Other"
 
 
-def build_relationship_summary(results_df):
+def add_relationship_column(results_df):
     rel_df = results_df.copy()
     rel_df["Industry 1"] = rel_df["Stock 1"].map(industry_of)
     rel_df["Industry 2"] = rel_df["Stock 2"].map(industry_of)
@@ -127,6 +222,11 @@ def build_relationship_summary(results_df):
         else " vs ".join(sorted([r["Industry 1"], r["Industry 2"]])),
         axis=1,
     )
+    return rel_df
+
+
+def build_relationship_summary(results_df):
+    rel_df = add_relationship_column(results_df)
     summary = (
         rel_df.groupby("Relationship")
         .agg(
@@ -251,45 +351,128 @@ if "results_df" in st.session_state:
     results_df = st.session_state["results_df"]
     returns = st.session_state["returns"]
 
+    trading_days = returns.shape[0]
+
+    st.markdown(describe_selection(returns.columns))
+
+    with st.expander("How this works", expanded=False):
+        st.caption(
+            f"We compared **{len(results_df)}** different stock pairs, using about "
+            f"**{trading_days}** days of trading history for each one "
+            f"({describe_span(trading_days)}). A pair only counts as reliable if "
+            "there's a very low chance the pattern happened by random luck."
+        )
+        st.markdown(
+            "We look at both the direction and size of each day's price move for both "
+            "stocks — do they tend to go up and down together, and by similar amounts, "
+            "not just occasionally match by chance? This is checked across all "
+            f"{trading_days} days and summarized into one score from -1 to 1. You can "
+            "see this visually in the scatter plot below: tightly clustered dots along "
+            "a rising line mean a high score (strong relationship), a scattered cloud "
+            "with no pattern means a low score (little to no relationship)."
+        )
+
     st.subheader("Correlation & significance for every pair")
-    st.caption(
-        f"{len(results_df)} pairs from {returns.shape[0]} trading days. "
-        f"'Significant?' uses the standard p < {SIGNIFICANCE_LEVEL} cutoff — "
-        "below that, the correlation is unlikely to be pure chance."
+
+    grouped_df = add_relationship_column(results_df)
+    avg_by_group = (
+        grouped_df.groupby("Relationship")["Correlation"].mean().sort_values(ascending=False)
     )
-    st.dataframe(
-        results_df.style.apply(style_significance, axis=1),
-        use_container_width=True,
-    )
+    within_groups = [g for g in avg_by_group.index if g.startswith("Within ")]
+    cross_groups = [g for g in avg_by_group.index if not g.startswith("Within ")]
+
+    for i, group in enumerate(within_groups + cross_groups):
+        group_df = grouped_df[grouped_df["Relationship"] == group]
+        group_sig = (group_df["Significant?"] == "Yes").sum()
+        with st.expander(
+            f"{group} — {len(group_df)} pairs, {group_sig} significant",
+            expanded=(i == 0),
+        ):
+            display_df = group_df[PAIR_TABLE_COLUMNS].copy()
+            display_df["Significant?"] = display_df["Significant?"].map(significance_label)
+            st.dataframe(
+                display_df.style.apply(
+                    style_significance, axis=1, subset=["Significant?"]
+                ),
+                column_config=PAIR_COLUMN_CONFIG,
+                width="stretch",
+                hide_index=True,
+            )
 
     n_significant = (results_df["Significant?"] == "Yes").sum()
     st.caption(
-        f"{n_significant} of {len(results_df)} pairs are statistically significant. "
-        "Note: at a 0.05 threshold, some 'significant' results are expected by "
-        "chance alone when testing many pairs at once."
+        f"**{n_significant}** of those **{len(results_df)}** comparisons showed a "
+        "pattern that's likely real, not just chance. The rest could easily be "
+        "coincidence. One caveat: when testing this many pairs at once, a few will "
+        "look 'real' purely by luck, even if they aren't."
     )
 
     st.subheader("Inspect a pair")
-    top_pairs = results_df.head(15).copy()
-    top_pairs["Pair"] = top_pairs["Stock 1"] + " vs " + top_pairs["Stock 2"]
-    selected_pair = st.selectbox(
-        "Choose one of the top 15 correlated pairs to see its daily returns",
-        top_pairs["Pair"],
-    )
-    pair_row = top_pairs[top_pairs["Pair"] == selected_pair].iloc[0]
-    s1, s2 = pair_row["Stock 1"], pair_row["Stock 2"]
+    st.caption("Pick any two stocks in the analysis — related or not — to compare directly.")
+    all_stocks = list(returns.columns)
 
-    scatter_fig = px.scatter(
-        returns,
-        x=s1,
-        y=s2,
-        trendline="ols",
-        title=f"Daily returns: {s1} vs {s2}",
-        labels={s1: f"{s1} daily return", s2: f"{s2} daily return"},
-    )
-    scatter_fig.update_xaxes(tickformat=".1%")
-    scatter_fig.update_yaxes(tickformat=".1%")
-    st.plotly_chart(scatter_fig, use_container_width=True)
+    col_a, col_b = st.columns(2)
+    with col_a:
+        stock_a = st.selectbox("Stock A", all_stocks, index=0)
+    with col_b:
+        stock_b = st.selectbox("Stock B", all_stocks, index=1 if len(all_stocks) > 1 else 0)
+
+    if stock_a == stock_b:
+        st.info("Pick two different stocks to compare.")
+    else:
+        pair_match = results_df[
+            ((results_df["Stock 1"] == stock_a) & (results_df["Stock 2"] == stock_b))
+            | ((results_df["Stock 1"] == stock_b) & (results_df["Stock 2"] == stock_a))
+        ]
+        pair_row = pair_match.iloc[0]
+        corr_value = pair_row["Correlation"]
+        p_value = pair_row["P-Value"]
+        is_significant = pair_row["Significant?"] == "Yes"
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Correlation", f"{corr_value:.3f}")
+        m2.metric("P-Value", f"{p_value:.4f}")
+        m3.metric("Statistically significant?", significance_label(pair_row["Significant?"]))
+
+        point_color = SIG_GREEN if is_significant else NOT_SIG_GRAY
+        line_color = SIG_GREEN_LINE if is_significant else NOT_SIG_RED_LINE
+
+        scatter_fig = px.scatter(
+            returns,
+            x=stock_a,
+            y=stock_b,
+            trendline="ols",
+            title=f"Daily returns: {stock_a} vs {stock_b}",
+            labels={
+                stock_a: f"{stock_a} daily return",
+                stock_b: f"{stock_b} daily return",
+            },
+            color_discrete_sequence=[point_color],
+            trendline_color_override=line_color,
+        )
+        scatter_fig.update_xaxes(tickformat=".1%")
+        scatter_fig.update_yaxes(tickformat=".1%")
+        st.plotly_chart(scatter_fig, use_container_width=True)
+        st.caption(
+            "Dot and line color reflect whether this relationship is statistically "
+            "reliable (green/blue = likely real, gray/red = could be chance)."
+        )
+
+        strength = correlation_strength(corr_value)
+        if is_significant:
+            verdict = (
+                "and this **is** statistically significant, meaning this pattern "
+                "is likely real."
+            )
+        else:
+            verdict = (
+                "and this **is not** statistically significant, meaning this could "
+                "easily be random chance."
+            )
+        st.markdown(
+            f"**{stock_a}** and **{stock_b}** show **{strength}** correlation "
+            f"(**{corr_value:.2f}**), {verdict}"
+        )
 
     st.subheader("Inference")
     relationship_summary = build_relationship_summary(results_df)
@@ -298,7 +481,7 @@ if "results_df" in st.session_state:
             "Avg Correlation": "{:.2f}",
             "% Significant": "{:.0f}%",
         }),
-        use_container_width=True,
+        width="stretch",
     )
     st.markdown(generate_inference_text(relationship_summary))
 
