@@ -4,12 +4,12 @@
 
 During an internship, I was given data and asked to find patterns in it. I found what looked
 like a trend, but had no way to check whether it was a real relationship or just something
-that happened to look that way by chance in that particular dataset — the same way flipping
+that happened to look that way by chance in that particular dataset  the same way flipping
 two coins 10 times can, purely by luck, land the same way 7 times and *look* correlated even
 though the coins have nothing to do with each other.
 
 This project is a tool that answers that question properly for stock prices: given a list of
-stocks, does Company A's price actually tend to move with Company B's — and is that
+stocks, does Company A's price actually tend to move with Company B's  and is that
 relationship statistically real, or likely coincidence?
 
 ## What it does
